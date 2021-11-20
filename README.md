@@ -1,2 +1,3 @@
 # learning-resource
-self-use learning resource
+self-used learning resource
+
