@@ -54,7 +54,7 @@ type ApplyMsg struct {
 }
 
 type Log struct {
-	term		int
+	Term		int
 	index		int
 }
 
@@ -175,10 +175,10 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 //
 type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
-	term			int
-	candidate_idx	int
-	last_log_idx	int
-	last_log_term	int
+	Term			int
+	Candidate_idx	int
+	Last_log_idx	int
+	Last_log_term	int
 }
 
 //
@@ -187,23 +187,23 @@ type RequestVoteArgs struct {
 //
 type RequestVoteReply struct {
 	// Your data here (2A).
-	vote_granted	bool
-	term			int
+	Vote_granted	bool
+	Term			int
 }
 
 type RequestAppendArgs struct {
-	term			int
-	leader_id		int
-	prev_log_idx	int
-	prev_log_term	int
+	Term			int
+	Leader_id		int
+	Prev_log_idx	int
+	Prev_log_term	int
 
-	entries			[]Log
+	Entries			[]Log
 	leader_commit	int
 }
 
 type RequestAppendReply struct {
-	term			int
-	success			bool
+	Term			int
+	Success			bool
 }
 
 //
@@ -213,26 +213,27 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	fmt.Printf("Candidate term: %d \n", args.term)
-	if args.term < rf.cur_term {
-		reply.vote_granted = false
-	} else if args.term == rf.cur_term{
+	if args.Term < rf.cur_term {
+		reply.Vote_granted = false
+	} else if args.Term == rf.cur_term {
 		rf.state = FOLLOWER
 		if rf.vote_for == -1 || rf.vote_for == rf.me {
-			if args.last_log_idx >= rf.log[len(rf.log)-1].index && args.last_log_term >= rf.log[len(rf.log)-1].term {
-				reply.vote_granted = true
+			if args.Last_log_idx >= rf.log[len(rf.log)-1].index && args.Last_log_term >= rf.log[len(rf.log)-1].Term {
+				reply.Vote_granted = true
+				rf.vote_for = args.Candidate_idx
 			} else {
-				reply.vote_granted = false;
+				reply.Vote_granted = false;
 			}
 		} else {
-			reply.vote_granted = false
+			reply.Vote_granted = false
 		}
 	} else {
 		rf.state = FOLLOWER
-		rf.cur_term = args.term
-		reply.vote_granted = true
+		rf.cur_term = args.Term
+		rf.vote_for = args.Candidate_idx
+		reply.Vote_granted = true
 	}
-	reply.term = rf.cur_term
+	reply.Term = rf.cur_term
 }
 
 //
@@ -243,22 +244,22 @@ func (rf *Raft) AppendEntries(args *RequestAppendArgs, reply *RequestAppendReply
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	if len(args.entries) == 0 {
+	if len(args.Entries) == 0 {
 		rf.heartsbeats = true
 		return
 	}
 
-	if args.term < rf.cur_term {
-		reply.success = false
+	if args.Term < rf.cur_term {
+		reply.Success = false
 	} else {
-		if args.prev_log_idx >= len(rf.log) || rf.log[args.prev_log_idx].term != args.prev_log_term {
-			reply.success = false
+		if args.Prev_log_idx >= len(rf.log) || rf.log[args.Prev_log_idx].Term != args.Prev_log_term {
+			reply.Success = false
 		} else {
 
 		}
 	}
 
-	reply.term = rf.cur_term
+	reply.Term = rf.cur_term
 }
 
 //
@@ -292,11 +293,10 @@ func (rf *Raft) AppendEntries(args *RequestAppendArgs, reply *RequestAppendReply
 //
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
-	fmt.Printf("vote rpc: %d\n", server)
 	return ok
 }
 
-func (rf *Raft) sendRequestAppend(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
+func (rf *Raft) sendRequestAppend(server int, args *RequestAppendArgs, reply *RequestAppendReply) bool {
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	return ok
 }
@@ -353,18 +353,20 @@ func (rf *Raft) GroupVote(server int, args *RequestVoteArgs, reply *RequestVoteR
 	rf.sendRequestVote(server, args, reply)
 }
 
-func (rf *Raft) GroupAppend(server int, args *RequestVoteArgs, reply *RequestVoteReply, wg *sync.WaitGroup) {
+func (rf *Raft) GroupAppend(server int, args *RequestAppendArgs, reply *RequestAppendReply, wg *sync.WaitGroup) {
 	defer wg.Done()
 
 	rf.sendRequestAppend(server, args, reply)
 }
 
 func (rf *Raft) elect() {
+	fmt.Printf("Node %d Electing, term %d\n", rf.me, rf.cur_term)
+	rf.vote_for = rf.me
 	req := RequestVoteArgs{}
-	req.candidate_idx = rf.me
-	req.term = rf.cur_term
-	req.last_log_idx = rf.log[len(rf.log)-1].index
-	req.last_log_term = rf.log[len(rf.log)-1].term
+	req.Candidate_idx = rf.me
+	req.Term = rf.cur_term
+	req.Last_log_idx = rf.log[len(rf.log)-1].index
+	req.Last_log_term = rf.log[len(rf.log)-1].Term
 
 	request := make([]RequestVoteArgs, len(rf.peers))
 	reply := make([]RequestVoteReply, len(rf.peers))
@@ -376,30 +378,30 @@ func (rf *Raft) elect() {
 		}
 		request[idx] = req
 		wg.Add(1)
-		fmt.Printf("RPC doing: %d\n", idx)
 		go rf.GroupVote(idx, &request[idx], &reply[idx], &wg)
 	}
 
 	wg.Wait()
 
 	n := len(rf.peers)
-	agree := 0
+	agree := 1
 	for idx, rep := range reply {
 		if idx == rf.me {
 			continue
 		}
-		if rep.term > rf.cur_term {
-			rf.cur_term = rep.term
+		if rep.Term > rf.cur_term {
+			rf.cur_term = rep.Term
 			rf.state = FOLLOWER
 			return
 		}
-		if rep.vote_granted && rep.term == rf.cur_term {
+		if rep.Vote_granted && rep.Term == rf.cur_term {
 			agree += 1
 		}
 	}
 
 	if agree >= n/2+1 {
 		rf.state = LEADER
+		fmt.Printf("Node %d Leader\n", rf.me)
 	}
 }
 
@@ -420,7 +422,7 @@ func (rf *Raft) ticker() {
 			rf.cur_term ++;
 		}
 
-		for rf.state == CANDIDATE {
+		if rf.state == CANDIDATE {
 			rf.elect()
 		}
 
@@ -460,9 +462,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.match_idx = make([]int, len(peers))
 
 	rf.heartsbeats = false
-	rf.log = append(rf.log, Log{term: 0, index: 0})
+	rf.log = append(rf.log, Log{Term: 0, index: 0})
 
-	rf.wait_time = 450 + (rand.Int63() % 100);
+	rf.wait_time = 200 + (rand.Int63() % 300);
 	rf.state = CANDIDATE
 
 	// initialize from state persisted before a crash
