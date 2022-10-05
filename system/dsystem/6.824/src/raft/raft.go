@@ -229,8 +229,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		}
 	} else {
 		rf.state = FOLLOWER
-		rf.cur_term = args.Term
 		rf.vote_for = args.Candidate_idx
+		rf.cur_term = args.Term
 		reply.Vote_granted = true
 	}
 	reply.Term = rf.cur_term
@@ -244,8 +244,9 @@ func (rf *Raft) AppendEntries(args *RequestAppendArgs, reply *RequestAppendReply
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
+	rf.heartsbeats = true
 	if len(args.Entries) == 0 {
-		rf.heartsbeats = true
+		rf.vote_for = -1
 		return
 	}
 
@@ -347,19 +348,38 @@ func (rf *Raft) killed() bool {
 	return z == 1
 }
 
-func (rf *Raft) GroupVote(server int, args *RequestVoteArgs, reply *RequestVoteReply, wg *sync.WaitGroup) {
-	defer wg.Done()
+func (rf *Raft) isCandidate() bool {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 
-	rf.sendRequestVote(server, args, reply)
+	return rf.state == CANDIDATE
 }
 
-func (rf *Raft) GroupAppend(server int, args *RequestAppendArgs, reply *RequestAppendReply, wg *sync.WaitGroup) {
-	defer wg.Done()
+func (rf *Raft) calculate_vote(msg_queue chan RequestVoteReply) {
+	agree := 0
+	n := len(rf.peers)
 
-	rf.sendRequestAppend(server, args, reply)
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if rf.state != CANDIDATE {
+		return
+	}
+	
+	for msg := range msg_queue {
+		if msg.Vote_granted {
+			agree++
+		}
+	}
+
+	fmt.Printf("Get Agree: %d\n", agree)
+	if agree >= n/2+1 {
+		rf.state = LEADER
+		fmt.Printf("Node %d becomde Leader, term %d\n", rf.me, rf.cur_term)
+	}
 }
 
 func (rf *Raft) elect() {
+	rf.mu.Lock()
 	fmt.Printf("Node %d Electing, term %d\n", rf.me, rf.cur_term)
 	rf.vote_for = rf.me
 	req := RequestVoteArgs{}
@@ -367,42 +387,27 @@ func (rf *Raft) elect() {
 	req.Term = rf.cur_term
 	req.Last_log_idx = rf.log[len(rf.log)-1].index
 	req.Last_log_term = rf.log[len(rf.log)-1].Term
+	rf.mu.Unlock()
 
 	request := make([]RequestVoteArgs, len(rf.peers))
 	reply := make([]RequestVoteReply, len(rf.peers))
+	msg_queue := make(chan RequestVoteReply, len(rf.peers))
 
-	var wg sync.WaitGroup
 	for idx, _ := range rf.peers {
 		if idx == rf.me {
 			continue
 		}
 		request[idx] = req
-		wg.Add(1)
-		go rf.GroupVote(idx, &request[idx], &reply[idx], &wg)
+		go func(idx int) {
+			rf.sendRequestVote(idx, &request[idx], &reply[idx])
+			msg_queue <- reply[idx]
+		}(idx)
 	}
 
-	wg.Wait()
-
-	n := len(rf.peers)
-	agree := 1
-	for idx, rep := range reply {
-		if idx == rf.me {
-			continue
-		}
-		if rep.Term > rf.cur_term {
-			rf.cur_term = rep.Term
-			rf.state = FOLLOWER
-			return
-		}
-		if rep.Vote_granted && rep.Term == rf.cur_term {
-			agree += 1
-		}
-	}
-
-	if agree >= n/2+1 {
-		rf.state = LEADER
-		fmt.Printf("Node %d Leader\n", rf.me)
-	}
+	time.AfterFunc(200 * time.Millisecond, func() {
+		rf.calculate_vote(msg_queue)
+	})
+	time.Sleep(200* time.Millisecond)
 }
 
 // The ticker go routine starts a new election if this peer hasn't received
@@ -414,19 +419,18 @@ func (rf *Raft) ticker() {
 		// be started and to randomize sleeping time using
 		// time.Sleep().
 		time.Sleep(time.Duration(rf.wait_time) * time.Millisecond)
-		
-		rf.mu.Lock()
 
+		rf.mu.Lock()
 		if rf.heartsbeats == false {
 			rf.state = CANDIDATE
-			rf.cur_term ++;
+			rf.cur_term++
+			rf.persist()
 		}
+		rf.mu.Unlock()
 
-		if rf.state == CANDIDATE {
+		if rf.isCandidate() {
 			rf.elect()
 		}
-
-		rf.mu.Unlock()
 	}
 }
 
@@ -464,7 +468,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.heartsbeats = false
 	rf.log = append(rf.log, Log{Term: 0, index: 0})
 
-	rf.wait_time = 200 + (rand.Int63() % 300);
+	rf.wait_time = 200 + (rand.Int63() % 400);
 	rf.state = CANDIDATE
 
 	// initialize from state persisted before a crash
