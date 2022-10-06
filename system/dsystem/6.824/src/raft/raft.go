@@ -27,6 +27,7 @@ import (
 	"math/rand"
 	"time"
 	"fmt"
+	"context"
 )
 
 
@@ -60,7 +61,7 @@ type Log struct {
 
 const LEADER int = 0
 const FOLLOWER int = 1
-const CANDIDATE int = 1
+const CANDIDATE int = 2
 //
 // A Go object implementing a single Raft peer.
 //
@@ -217,7 +218,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.Vote_granted = false
 	} else if args.Term == rf.cur_term {
 		rf.state = FOLLOWER
-		if rf.vote_for == -1 || rf.vote_for == rf.me {
+		rf.heartsbeats = true
+		if rf.vote_for == -1 {
 			if args.Last_log_idx >= rf.log[len(rf.log)-1].index && args.Last_log_term >= rf.log[len(rf.log)-1].Term {
 				reply.Vote_granted = true
 				rf.vote_for = args.Candidate_idx
@@ -229,11 +231,13 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		}
 	} else {
 		rf.state = FOLLOWER
+		rf.heartsbeats = true
 		rf.vote_for = args.Candidate_idx
 		rf.cur_term = args.Term
 		reply.Vote_granted = true
 	}
 	reply.Term = rf.cur_term
+	// fmt.Printf("Vote RPC Finish %d \n", rf.me)
 }
 
 //
@@ -246,7 +250,6 @@ func (rf *Raft) AppendEntries(args *RequestAppendArgs, reply *RequestAppendReply
 
 	rf.heartsbeats = true
 	if len(args.Entries) == 0 {
-		rf.vote_for = -1
 		return
 	}
 
@@ -356,14 +359,14 @@ func (rf *Raft) isCandidate() bool {
 }
 
 func (rf *Raft) calculate_vote(msg_queue chan RequestVoteReply) {
-	agree := 0
-	n := len(rf.peers)
-
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	if rf.state != CANDIDATE {
 		return
 	}
+	rf.vote_for = rf.me
+	agree := 1
+	n := len(rf.peers)
 	
 	for msg := range msg_queue {
 		if msg.Vote_granted {
@@ -371,27 +374,30 @@ func (rf *Raft) calculate_vote(msg_queue chan RequestVoteReply) {
 		}
 	}
 
-	fmt.Printf("Get Agree: %d\n", agree)
+	fmt.Printf("Node %d Get Agree: %d\n", rf.me, agree)
 	if agree >= n/2+1 {
 		rf.state = LEADER
-		fmt.Printf("Node %d becomde Leader, term %d\n", rf.me, rf.cur_term)
+		fmt.Printf("Node %d become Leader, term %d\n", rf.me, rf.cur_term)
 	}
 }
 
 func (rf *Raft) elect() {
 	rf.mu.Lock()
+	if rf.state != CANDIDATE {
+		return
+	}
 	fmt.Printf("Node %d Electing, term %d\n", rf.me, rf.cur_term)
-	rf.vote_for = rf.me
 	req := RequestVoteArgs{}
 	req.Candidate_idx = rf.me
 	req.Term = rf.cur_term
 	req.Last_log_idx = rf.log[len(rf.log)-1].index
 	req.Last_log_term = rf.log[len(rf.log)-1].Term
 	rf.mu.Unlock()
-
 	request := make([]RequestVoteArgs, len(rf.peers))
 	reply := make([]RequestVoteReply, len(rf.peers))
+
 	msg_queue := make(chan RequestVoteReply, len(rf.peers))
+	ctx, cancel := context.WithTimeout(context.Background(), 200 * time.Millisecond)
 
 	for idx, _ := range rf.peers {
 		if idx == rf.me {
@@ -400,11 +406,18 @@ func (rf *Raft) elect() {
 		request[idx] = req
 		go func(idx int) {
 			rf.sendRequestVote(idx, &request[idx], &reply[idx])
-			msg_queue <- reply[idx]
+			select {
+				case <- ctx.Done():
+					return
+				default:
+					msg_queue <- reply[idx]
+			}
 		}(idx)
 	}
 
 	time.AfterFunc(200 * time.Millisecond, func() {
+		cancel()
+		close(msg_queue)
 		rf.calculate_vote(msg_queue)
 	})
 	time.Sleep(200* time.Millisecond)
@@ -422,10 +435,13 @@ func (rf *Raft) ticker() {
 
 		rf.mu.Lock()
 		if rf.heartsbeats == false {
-			rf.state = CANDIDATE
-			rf.cur_term++
-			rf.persist()
+			if rf.state == FOLLOWER {
+				rf.state = CANDIDATE
+				rf.cur_term++
+				rf.persist()
+			}
 		}
+		rf.heartsbeats = false
 		rf.mu.Unlock()
 
 		if rf.isCandidate() {
@@ -455,7 +471,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// Your initialization code here (2A, 2B, 2C).
 
 	// persistent
-	rf.cur_term = -1
+	rf.cur_term = 0
 	rf.vote_for = -1
 
 	// volatile
@@ -469,7 +485,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.log = append(rf.log, Log{Term: 0, index: 0})
 
 	rf.wait_time = 200 + (rand.Int63() % 400);
-	rf.state = CANDIDATE
+	rf.state = FOLLOWER
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
